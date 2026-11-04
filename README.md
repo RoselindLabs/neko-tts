@@ -13,7 +13,7 @@
 0.7.0需要 MaiBot **1.3.11+并具备下述精确回执本地补丁**、SDK **2.10.0+**、Python 3.12+、aiohttp 3.12+。宿主注册组件时会校验Hook是否存在，因此即使暂用同步模式，未修改的上游宿主也不能直接安装0.7.0；无补丁请保留0.6.5，不绕过Hook校验。音色克隆及多段音频合并需要 FFmpeg（PATH 或配置指定）。
 
 ```sh
-git clone https://github.com/znzsofficial/neko-tts.git plugins/neko-tts
+git clone https://github.com/RoselindLabs/neko-tts.git plugins/neko-tts
 ```
 
 复制 `config.example.toml` 为 `config.toml`，填 MiMo 密钥，在 WebUI 启用。默认关闭。启用前停用 `ling.tts-bot` 等自动出站 TTS，防止双重合成。无需依赖旧插件、无需复制它的代码或缓存。
