@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, patch
 
-from audio import decode_response
+from audio import SpeechEngine, decode_response
 from plugin import Config, NekoTTS
 from test_audio import audio_response, pcm_wav
 
@@ -105,19 +105,28 @@ class LifecycleTests(IsolatedAsyncioTestCase):
         self.assertFalse(self.p._tasks)
         self.p.ctx.send.custom.assert_not_awaited()
 
-    async def test_reload_discards_already_prepared_audio_if_a_later_message_is_cancelled(self):
-        self.messages.append({'segments': [{'type': 'text', 'data': '第二句'}], 'quote_previous': False})
-        blocked = self.p._engine.render.side_effect
-        async def render(chunks, config):
-            if chunks == ['正文']:
+    async def test_reload_discards_prepared_internal_chunk_when_later_chunk_is_cancelled(self):
+        self.messages.append({'segments': [{'type': 'text', 'data': '第二句' * 30}], 'quote_previous': False})
+        self.p.config.general.max_text_length = 50
+        self.p.config.mimo.synthesis_mode = 'preset'
+        self.p.config.mimo.api_key = 'offline-test'
+        engine = SpeechEngine('unused')
+        engine.session = SimpleNamespace(close=AsyncMock())
+        async def request(*args):
+            if engine._request_audio.await_count == 1:
                 return pcm_wav()
-            return await blocked(chunks, config)
-        self.p._engine.render.side_effect = render
+            await self.started.put(asyncio.current_task())
+            await self.release.wait()
+        engine._request_audio = AsyncMock(side_effect=request)
+        engine.merge = AsyncMock()
+        self.p._engine = engine
         self.p.config.output.mode = 'voice_only'
         caller = asyncio.create_task(self.host_transform())
         await self.started.get()
         await self.reload()
         self.assertEqual(await caller, self.messages)
+        self.assertEqual(engine._request_audio.await_count, 2)
+        engine.merge.assert_not_awaited()
         self.assertFalse(self.p._visibility.pending)
         self.assertFalse(self.p._reply_visibility.calls)
         self.p.ctx.send.custom.assert_not_awaited()

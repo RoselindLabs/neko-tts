@@ -26,6 +26,22 @@ except ImportError:
     from focus_scope import planner_scopes
 
 
+def join_reply_text(texts):
+    """Keep pauses across Host messages, including punctuation inside closers."""
+    pauses = '。！？!?.,，、；;：:…—～~'
+    closers = '\"\'”’」』）》】〕〉)]}'
+    parts = []
+    for text in texts:
+        text = text.strip()
+        if not text:
+            continue
+        ending = text.rstrip(closers + ' \t\r\n')
+        if not ending or ending[-1] not in pauses:
+            text += '。'
+        parts.append(text)
+    return '\n'.join(parts)
+
+
 class PluginSection(PluginConfigBase):
     enabled: bool = Field(default=False, description="启用插件；上线前停用其他自动 TTS 插件")
     config_version: str = Field(default="0.6.2")
@@ -201,24 +217,19 @@ class NekoTTS(MaiBotPlugin):
         if phase != "before_send":
             return {}
         try:
-            # These are Host post-processed messages, not the unsplit replyer
-            # text. Keep their boundaries all the way through synthesis/send.
+            # Use Host post-processed text, never the unsplit replyer text.
             speech = []
-            total_length = total_chunks = 0
             config = self.config.general.model_dump()
             for index, message in enumerate(messages or []):
                 spoken = ''.join(segment['data'] for segment in message.get('segments', [])
                                  if segment.get('type') == 'text' and isinstance(segment.get('data'), str)).strip()
                 if not spoken:
                     continue
-                chunks = split_text(spoken, config)
-                total_length += sum(len(chunk) for chunk in chunks)
-                total_chunks += len(chunks)
                 speech.append((index, spoken))
             if not speech:
                 return {}
-            if total_length > config['max_total_length'] or total_chunks > config['max_segments']:
-                raise ValueError('整条回复超过语音长度或段数限制')
+            spoken = join_reply_text(text for _, text in speech)
+            split_text(spoken, config)  # Includes added punctuation/separators in budgets.
             if self.config.output.mode == "text_then_voice":
                 stream_id = str(kwargs.get("session_id") or "").strip()
                 if not stream_id:
@@ -228,26 +239,21 @@ class NekoTTS(MaiBotPlugin):
                 return {"messages": deepcopy(messages)}
 
             generation = self._generation
-            voices = {}
             rpc_bytes = len(json.dumps(messages, ensure_ascii=False).encode('utf-8')) if self.config.output.mode != 'voice_only' else 2
             if rpc_bytes > 12 * 1024 * 1024:
                 raise ValueError('原回复已超过语音扩展传输预算')
-            # Whole-reply deadline, not a fresh timeout for every short message.
-            # Prepare all audio first: a later failure leaves the entire reply
-            # intact, rather than leaking a partially transformed message list.
+            # One render/send per reply; the engine merges only overlong chunks.
             async with asyncio.timeout(config['timeout']):
-                for index, spoken in speech:
-                    audio = await self._render(spoken)
-                    if generation != self._generation:
-                        raise ValueError('配置已更新，请重新调用')
-                    if len(audio) > 8 * 1024 * 1024:
-                        raise ValueError('语音单段超过安全传输大小')
-                    voice = voice_message(audio)
-                    rpc_bytes += len(json.dumps(voice, ensure_ascii=False).encode('utf-8')) + 1
-                    if rpc_bytes > 12 * 1024 * 1024:
-                        raise ValueError('语音回复超过安全传输大小')
-                    voices[index] = voice
-            result = list(voices.values()) if self.config.output.mode == 'voice_only' else deepcopy(messages) + list(voices.values())
+                audio = await self._render(spoken)
+                if generation != self._generation:
+                    raise ValueError('配置已更新，请重新调用')
+                if len(audio) > 8 * 1024 * 1024:
+                    raise ValueError('语音单段超过安全传输大小')
+                voice = voice_message(audio)
+                rpc_bytes += len(json.dumps(voice, ensure_ascii=False).encode('utf-8')) + 1
+                if rpc_bytes > 12 * 1024 * 1024:
+                    raise ValueError('语音回复超过安全传输大小')
+            result = [voice] if self.config.output.mode == 'voice_only' else deepcopy(messages) + [voice]
             # Host RPC max frame is 16MiB. Reserve envelope overhead and avoid
             # handing the Host a successful-but-unsendable audio batch.
             if len(json.dumps(result, ensure_ascii=False).encode('utf-8')) > 12 * 1024 * 1024:
@@ -255,9 +261,8 @@ class NekoTTS(MaiBotPlugin):
             # Keep original indices/quote chains intact: inserting audio
             # between text messages would change what quote_previous targets.
             scope = str(kwargs.get('session_id') or '').strip()
-            for voice in voices.values():
-                self._visibility.remember_audio(scope, base64.b64decode(voice['segments'][0]['binary_data_base64']))
-            self._reply_visibility.remember(scope, kwargs.get('call_id'), len(voices), self.config.output.mode)
+            self._visibility.remember_audio(scope, audio)
+            self._reply_visibility.remember(scope, kwargs.get('call_id'), 1, self.config.output.mode)
             try:
                 self._reply_visibility.save()
             except OSError:
@@ -332,10 +337,9 @@ class NekoTTS(MaiBotPlugin):
             return None
         config = self.config.general.model_dump()
         try:
-            chunks = [chunk for _, text in speech for chunk in split_text(text, config)]
-            if sum(map(len, chunks)) > config['max_total_length'] or len(chunks) > config['max_segments']:
-                raise ValueError('最终发送正文超过整条回复语音限制')
-            self._voice_queue.put_nowait((session_id, speech, time.monotonic() + config['timeout'], self._generation))
+            spoken = join_reply_text(text for _, text in speech)
+            split_text(spoken, config)
+            self._voice_queue.put_nowait((session_id, spoken, time.monotonic() + config['timeout'], self._generation))
         except (ValueError, asyncio.QueueFull):
             self.ctx.logger.warning('Neko TTS 后台队列已满或正文超限，文字已保留，不重试')
             return None
@@ -349,7 +353,7 @@ class NekoTTS(MaiBotPlugin):
         try:
             while True:
                 try:
-                    stream, speech, deadline, generation = self._voice_queue.get_nowait()
+                    stream, spoken, deadline, generation = self._voice_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     return
                 try:
@@ -357,11 +361,8 @@ class NekoTTS(MaiBotPlugin):
                     if remaining <= 0 or generation != self._generation:
                         continue
                     async with asyncio.timeout(remaining):
-                        for _, text in speech:
-                            if generation != self._generation or not self._ready or not self.config.plugin.enabled:
-                                break
-                            if not await self._background_voice(text, stream):
-                                break
+                        if self._ready and self.config.plugin.enabled:
+                            await self._background_voice(spoken, stream)
                 except TimeoutError:
                     self.ctx.logger.warning('Neko TTS 后台整条回复已超时（含排队），文字已保留，不重试')
                 finally:

@@ -9,8 +9,8 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import web
-from audio import SpeechEngine, SpeechError, decode_response
-from plugin import Config
+from audio import SpeechEngine, SpeechError, decode_response, split_text
+from plugin import Config, NekoTTS, join_reply_text
 
 
 def pcm_wav():
@@ -107,6 +107,34 @@ class TransportTests(IsolatedAsyncioTestCase):
         self.assertEqual(body['audio']['voice'], '冰糖')
         self.assertEqual(body['messages'][0]['content'], self.config['voice']['clone_prompt'])
         self.assertEqual(body['messages'][1]['content'], '你好')
+
+    async def test_joined_reply_one_request_or_internal_chunks_merged_to_one_voice(self):
+        import imageio_ffmpeg
+        from test_plugin import PluginTests
+        fixture = PluginTests(methodName='test_prepare_is_noop')
+        fixture.setUp()
+        p = fixture.p
+        p.test_config = Config(**self.config)
+        p.config.plugin.enabled = True
+        p.config.voice.ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        p._engine = self.engine
+        p._render = NekoTTS._render.__get__(p)
+        for texts in (['第一句', '第二句', '第三句', '第四句'], ['长句' * 30] * 4):
+            with self.subTest(long=len(texts[0]) > 50):
+                self.calls.clear()
+                p.config.general.max_text_length = 50
+                messages = [{'segments': [{'type': 'text', 'data': text}]} for text in texts]
+                result = await p.voice_reply_extension(phase='before_send', messages=messages)
+                self.assertEqual(result['messages'][:-1], messages)
+                chunks = split_text(join_reply_text(texts), p.config.general.model_dump())
+                self.assertEqual([c[0]['messages'][1]['content'] for c in self.calls], chunks)
+                if len(texts[0]) < 50:
+                    self.assertEqual(len(self.calls), 1)
+                else:
+                    self.assertGreater(len(self.calls), 1)
+                audio = base64.b64decode(result['messages'][-1]['segments'][0]['binary_data_base64'])
+                with wave.open(io.BytesIO(audio), 'rb') as file:
+                    self.assertEqual(file.getnframes(), 2400 * len(chunks))
 
     async def test_fixed_prompt_is_verbatim(self):
         base = '用原本的音色和语气说话，保持自然流畅'

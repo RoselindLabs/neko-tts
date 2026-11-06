@@ -101,15 +101,35 @@ class WorkerTests(IsolatedAsyncioTestCase):
         self.p._background_voice = AsyncMock(return_value=True)
         await self.admit('r1', 'm1', '第一句'); await self.admit('r2', 'm2', '第二句')
         await asyncio.gather(*list(self.p._tasks))
-        self.assertEqual([c.args for c in self.p._background_voice.await_args_list], [('第一句', 'chat'), ('第二句', 'chat')])
+        self.assertEqual([c.args for c in self.p._background_voice.await_args_list], [('第一句。', 'chat'), ('第二句。', 'chat')])
+
+    async def test_four_confirmed_texts_render_and_send_once_and_duplicate_is_ignored(self):
+        self.p._deferred.register('chat', 'r', 'c', [(i, 'original') for i in range(4)])
+        payload = dict(session_id='chat', reply_id='r', call_id='c', send_results=[
+            receipt(i, str(i), f'实际{i}') for i in reversed(range(4))])
+        await self.p.after_reply_delivery(**payload)
+        await asyncio.gather(*list(self.p._tasks))
+        await self.p.after_reply_delivery(**payload)
+        self.p._render.assert_awaited_once_with('实际0。\n实际1。\n实际2。\n实际3。')
+        self.p.ctx.send.custom.assert_awaited_once()
+
+    async def test_only_successful_actual_text_is_joined_not_attachment_or_unknown(self):
+        self.p._deferred.register('chat', 'r', 'c', [(i, 'original') for i in (0, 2, 3, 4, 5)])
+        await self.p.after_reply_delivery(session_id='chat', reply_id='r', call_id='c', send_results=[
+            receipt(5, '5', '“改写！”'), receipt(0, '0', '首句改写'),
+            receipt(1, '1', '附件占位'), receipt(2, '2', '失败', False),
+            receipt(3, '', '未知'), receipt(4, '4', ' ')])
+        await asyncio.gather(*list(self.p._tasks))
+        self.p._render.assert_awaited_once_with('首句改写。\n“改写！”')
+        self.p.ctx.send.custom.assert_awaited_once()
 
     async def test_expired_queue_never_synthesizes(self):
-        self.p._voice_queue.put_nowait(('chat', [(0, 'a')], 0, self.p._generation))
+        self.p._voice_queue.put_nowait(('chat', 'a。', 0, self.p._generation))
         await self.p._drain_voice_queue()
         self.p._render.assert_not_awaited()
 
     async def test_queue_full_drops_voice_without_replay(self):
-        for _ in range(8):self.p._voice_queue.put_nowait(('chat', [], 0, 0))
+        for _ in range(8):self.p._voice_queue.put_nowait(('chat', '', 0, 0))
         await self.admit()
         self.assertIsNone(self.p._voice_worker)
         self.assertFalse(self.p._deferred.pending)
@@ -124,15 +144,13 @@ class WorkerTests(IsolatedAsyncioTestCase):
 
     async def test_one_deadline_covers_whole_batch(self):
         async def slow(text, stream):
-            if text == 'b':
-                await asyncio.Event().wait()
-            return True
+            await asyncio.Event().wait()
         self.p._background_voice = AsyncMock(side_effect=slow)
-        self.p._voice_queue.put_nowait(('chat', [(0, 'a'), (1, 'b')], 9999999999, self.p._generation))
+        self.p._voice_queue.put_nowait(('chat', 'a。\nb。', 9999999999, self.p._generation))
         original = asyncio.timeout
         with patch('plugin.asyncio.timeout', side_effect=lambda _: original(.04)):
             await self.p._drain_voice_queue()
-        self.assertEqual(self.p._background_voice.await_count, 2)
+        self.assertEqual(self.p._background_voice.await_count, 1)
         self.assertEqual(self.p._voice_queue.qsize(), 0)
 
     async def test_unrelated_text_send_never_admits_voice(self):

@@ -6,11 +6,17 @@ from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, patch
 
-from plugin import NekoTTS, Config
+from plugin import NekoTTS, Config, join_reply_text
 from audio import split_text, voice_message
 
 
 class TextTests(TestCase):
+    def test_reply_pauses_quotes_and_empty_text(self):
+        self.assertEqual(join_reply_text(['  第一  ', '', ' \n', '“你好！”', '（真的？）', '"yes!"', '「好」']),
+                         '第一。\n“你好！”\n（真的？）\n"yes!"\n「好」。')
+        for mark in '。！？!?.,，、；;：:…—～~':
+            self.assertEqual(join_reply_text([f'句{mark}”）', 'next']), f'句{mark}”）\nnext。')
+
     def test_voice_extension_has_no_parameters(self):
         info = NekoTTS.voice_reply_extension.__maibot_component_info__
         self.assertEqual(info.parameters_schema, {'type': 'object', 'properties': {}, 'additionalProperties': False})
@@ -80,7 +86,7 @@ class PluginTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.messages, before)
         self.assertEqual(result['messages'][:-1], before)
         self.assertFalse(result['messages'][-1]['quote_previous'])
-        self.p._render.assert_awaited_once_with('你好')
+        self.p._render.assert_awaited_once_with('你好。')
         self.p.ctx.send.custom.assert_not_called()
 
     async def test_tts_receipt_removed_from_both_model_prompts(self):
@@ -128,7 +134,7 @@ class PluginTests(IsolatedAsyncioTestCase):
 
     async def test_audio_batch_rpc_budget_preserves_original(self):
         self.p._render.return_value = b'x' * (5 * 1024 * 1024)
-        messages = [self.messages[0], self.messages[0]]
+        messages = [{'segments': [{'type': 'image', 'data': 'x' * (6 * 1024 * 1024)}]}, self.messages[0]]
         self.assertEqual(await self.p.voice_reply_extension(phase='before_send', messages=messages, session_id='chat-a'), {})
         self.assertFalse(self.p._visibility.pending)
 
@@ -145,33 +151,36 @@ class PluginTests(IsolatedAsyncioTestCase):
         self.assertEqual(len(result['messages']), 1)
         self.assertEqual(result['messages'][0]['segments'][0]['type'], 'voice')
 
-    async def test_host_split_messages_render_and_send_separately(self):
+    async def test_four_host_messages_render_once_preserving_attachments(self):
         messages = [
             {'segments': [{'type': 'text', 'data': '第一句'}], 'quote_previous': True},
             self.messages[1],
             {'segments': [{'type': 'at', 'data': 'someone'}, {'type': 'text', 'data': '第二句'}], 'quote_previous': False},
+            {'segments': [{'type': 'text', 'data': '第三句！'}]},
+            {'segments': [{'type': 'text', 'data': '“第四句？”'}]},
+            {'segments': [{'type': 'text', 'data': '  '}]},
         ]
         original = deepcopy(messages)
-        self.p._render.side_effect = [b'first-audio', b'second-audio']
         result = await self.p.voice_reply_extension(phase='before_send', text='断句前整句不要朗读', messages=messages)
-        self.assertEqual([call.args for call in self.p._render.await_args_list], [('第一句',), ('第二句',)])
+        self.p._render.assert_awaited_once_with('第一句。\n第二句。\n第三句！\n“第四句？”')
         out = result['messages']
-        self.assertEqual(out[:3], original)
-        self.assertEqual([out[i]['segments'][0]['type'] for i in [3, 4]], ['voice', 'voice'])
-        self.assertEqual([base64.b64decode(out[i]['segments'][0]['binary_data_base64']) for i in [3, 4]], [b'first-audio', b'second-audio'])
+        self.assertEqual(out[:-1], original)
+        self.assertEqual(out[-1]['segments'][0]['type'], 'voice')
+        self.assertEqual(base64.b64decode(out[-1]['segments'][0]['binary_data_base64']), b'audio')
         self.assertEqual(messages, original)
 
-    async def test_voice_only_keeps_host_split_boundaries(self):
+    async def test_voice_only_replaces_whole_reply_with_one_voice(self):
         self.p.config.output.mode = 'voice_only'
         messages = [self.messages[0], {'segments': [{'type': 'text', 'data': '第二句'}], 'quote_previous': False}]
         result = await self.p.voice_reply_extension(phase='before_send', messages=messages)
-        self.assertEqual(len(result['messages']), 2)
+        self.assertEqual(len(result['messages']), 1)
+        self.p._render.assert_awaited_once_with('你好。\n第二句。')
         self.assertTrue(all(m['segments'][0]['type'] == 'voice' and not m['quote_previous'] for m in result['messages']))
 
-    async def test_second_segment_failure_keeps_entire_original_reply(self):
+    async def test_joined_render_failure_keeps_entire_original_reply(self):
         messages = [self.messages[0], {'segments': [{'type': 'text', 'data': '第二句'}], 'quote_previous': False}]
         original = deepcopy(messages)
-        self.p._render.side_effect = [b'first', RuntimeError('failed')]
+        self.p._render.side_effect = RuntimeError('failed')
         self.assertEqual(await self.p.voice_reply_extension(phase='before_send', messages=messages), {})
         self.assertEqual(messages, original)
         self.p.ctx.send.custom.assert_not_called()
@@ -183,13 +192,14 @@ class PluginTests(IsolatedAsyncioTestCase):
         self.p._render.assert_not_called()
         self.p.config.general.max_total_length = 2000
         self.p.config.general.max_segments = 1
+        self.p.config.general.max_text_length = 50
         self.assertEqual(await self.p.voice_reply_extension(phase='before_send', messages=messages), {})
         self.p._render.assert_not_called()
 
     async def test_whole_reply_deadline_and_reload_preserve_original(self):
         messages = [self.messages[0], {'segments': [{'type': 'text', 'data': '第二句'}], 'quote_previous': False}]
         async def slow(text):
-            await asyncio.sleep(.02)
+            await asyncio.sleep(.05)
             return b'audio'
         self.p._render.side_effect = slow
         timeout = asyncio.timeout
@@ -201,7 +211,7 @@ class PluginTests(IsolatedAsyncioTestCase):
         self.p._render.side_effect = reloaded
         self.assertEqual(await self.p.voice_reply_extension(phase='before_send', messages=messages), {})
 
-    async def test_background_matches_each_host_message_without_rejoining(self):
+    async def test_background_joins_confirmed_host_messages(self):
         self.p.config.output.mode = 'text_then_voice'
         messages = [self.messages[0], {'segments': [{'type': 'text', 'data': '第二句'}], 'quote_previous': False}]
         await self.p.voice_reply_extension(phase='before_send', messages=messages, session_id='chat-a', reply_id='r', call_id='c')
@@ -210,7 +220,7 @@ class PluginTests(IsolatedAsyncioTestCase):
             {'index': 0, 'success': True, 'message_id': '1', 'text': '你好'},
             {'index': 1, 'success': True, 'message_id': '2', 'text': '第二句'}])
         await asyncio.gather(*list(self.p._tasks))
-        self.assertEqual([call.args for call in self.p._background_voice.await_args_list], [('你好', 'chat-a'), ('第二句', 'chat-a')])
+        self.p._background_voice.assert_awaited_once_with('你好。\n第二句。', 'chat-a')
 
     async def test_attachment_only_is_unchanged(self):
         self.assertEqual(await self.p.voice_reply_extension(phase='before_send', messages=[self.messages[1]]), {})
@@ -238,7 +248,7 @@ class PluginTests(IsolatedAsyncioTestCase):
         await self.p.after_reply_delivery(session_id='chat-a', reply_id='r', call_id='c', send_results=[
             {'index': 0, 'success': True, 'message_id': '1', 'text': '你好'}])
         await asyncio.gather(*list(self.p._tasks))
-        self.p._background_voice.assert_awaited_once_with('你好', 'chat-a')
+        self.p._background_voice.assert_awaited_once_with('你好。', 'chat-a')
         self.assertFalse(self.p._deferred.pending)
 
     async def test_background_registration_requires_chat(self):
@@ -267,7 +277,7 @@ class PluginTests(IsolatedAsyncioTestCase):
     async def test_concurrent_replies_use_text_only(self):
         await asyncio.gather(*(self.p.voice_reply_extension(phase='before_send', messages=self.messages,
                                                           parameters={}) for _ in range(2)))
-        self.assertEqual([call.args for call in self.p._render.await_args_list], [('你好',), ('你好',)])
+        self.assertEqual([call.args for call in self.p._render.await_args_list], [('你好。',), ('你好。',)])
 
     def reply_item(self, args=None):
         return {'item_type': 'FunctionCallItem', 'meta': {'item_id': 'id'},
@@ -365,7 +375,7 @@ class PluginTests(IsolatedAsyncioTestCase):
         await asyncio.gather(*tasks)
         await self.p.after_reply_delivery(**receipt)
         await asyncio.sleep(0)
-        self.p._render.assert_awaited_once_with('你好')
+        self.p._render.assert_awaited_once_with('你好。')
         self.p.ctx.send.custom.assert_awaited_once()
         self.assertFalse(self.p._deferred.pending)
 
