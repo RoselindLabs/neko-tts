@@ -116,7 +116,7 @@ python scripts/package.py --output neko-tts.zip
 
 测试覆盖真实 SDK 导入、混合触发/主动优先/避免重复/其他工具不变、回复扩展失败回退、命令鉴权、分段保真、固定提示原样发送、模拟 MiMo HTTP、限流退避、缺失音频恢复和重试上限，以及实际 FFmpeg 参考选取和合并。无系统 FFmpeg 时可在测试命令加 `--with imageio-ffmpeg`。
 
-日常源码CI用Linux生产Python3.14.4/SDK2.16.0与Windows最低Python3.12/SDK2.10两组；原Ubuntu/Windows × Python3.12/3.14 × SDK2.10/2.12/最新共12组兼容保留在v标签、手动full及有源码变化的夜间验证，另保留固定生产组合。
+日常源码CI用Ubuntu 24.04生产组合（CPython 3.14.4、SDK 2.23.0）与Windows最低Python3.12/SDK2.10两组；原Ubuntu/Windows × Python3.12/3.14 × SDK2.10/2.12/最新共12组兼容保留在v标签、手动full及有源码变化的夜间验证，另保留固定生产组合。
 额外保留manifest声明的2.10最低支持档。PyPI包名`maibot-plugin-sdk`，导入名`maibot_sdk`。
 门禁要求音频/回执/生命周期/共享Focus/历史可见性/打包等关键测试组非空并实际成功，0 skip、0失败，不以固定总用例数证明正确；缺真实SDK、缺FFmpeg导致关键测试跳过均失败。
 CI显式装`imageio-ffmpeg`作为真实FFmpeg备用（测试优先系统PATH，否则使用其二进制）、`tzdata`统一Windows时区依赖。
