@@ -26,6 +26,7 @@ required = {
     "test_lifecycle",
     "test_focus_scope",
     "test_history_visibility",
+    "test_prepare_history",
     "test_package",
     "test_plugin",
 }

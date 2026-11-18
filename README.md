@@ -1,4 +1,6 @@
-# Neko TTS 0.7.4
+# Neko TTS 0.7.5
+
+0.7.5 适配配套 Host 1.4.6 的普通 Replyer：在历史渲染前，仅隐藏本插件已确认发送的自身纯语音行。当前回复目标、引用和原始聊天记录保留。
 
 0.7.4将同次reply的宿主文字断句补齐停顿后合成一条语音，正常长度一次MiMo请求，超长才内部切段合并。后台模式仍只消费精确成功回执的实际正文。此次开发登记的线上基线为0.7.3/7be09de；本地起点为e402ac9（含后续生命周期修复），不代表已部署。
 
@@ -12,7 +14,9 @@
 
 ## 安装
 
-0.7.0需要 MaiBot **1.3.11+并具备下述精确回执本地补丁**、SDK **2.10.0+**、Python 3.12+、aiohttp 3.12+。宿主注册组件时会校验Hook是否存在，因此即使暂用同步模式，未修改的上游宿主也不能直接安装0.7.0；无补丁请保留0.6.5，不绕过Hook校验。音色克隆及多段音频合并需要 FFmpeg（PATH 或配置指定）。
+0.7.5 需要 **MaiBot 1.4.6+，同时具备 `maisaka.replyer.prepare_history` v1 和原精确发送回执 `maisaka.reply.after_send`**。仅升级上游版本号不够。Host 会在组件注册阶段拒绝未知 Hook，`error_policy=skip` 不能跳过注册校验。仍用 1.4.5 配套宿主的请固定插件 [0.7.4（ccf4b5d）](https://github.com/RoselindLabs/neko-tts/tree/ccf4b5d)，保留原行为；待 Host 和插件配套再一起升级。
+
+依赖 SDK **2.10.0+**、Python 3.12+、aiohttp 3.12+。音色克隆及多段音频合并需要 FFmpeg（PATH 或配置指定）。
 
 ```sh
 git clone https://github.com/RoselindLabs/neko-tts.git plugins/neko-tts
@@ -35,6 +39,10 @@ git clone https://github.com/RoselindLabs/neko-tts.git plugins/neko-tts
 主动选择和随机选择均绑定当前 reply；后台模式的关联限制见下文。
 
 ## 麦麦的上下文
+
+**1.4.6 普通 Replyer。** Host 在渲染前调用独立阻塞 Hook `maisaka.replyer.prepare_history`，传入 `schema_version: 1`、`session_id`、`reply_message_id` 和本轮该会话的 `entries`。每项提供不透明的 `handle`、完整 `message_id`、`is_self`、`pure_voice`。只有两个标志均为布尔 `true`，且本插件已凭音频哈希及成功发送回执记录了完全相同的 `(session_id, message_id)`、回执仍有效时，才返回该行的 handle；目标 ID 和有歧义的重复 handle 保留。返回值为 `{"action":"continue","custom_result":{"schema_version":1,"hide":[...]}}`，由 Host 仅过滤本轮普通历史行，保留独立目标块和引用。不返回改写后的提示，不解析昵称、别名、转写或 `[语音消息]` 字面内容。仅准备了音频、仅登记了 reply 调用、或缺少成功回执都不够。禁用或未就绪时不干预。
+
+**旧 Context Items 路径。** 原 `maisaka.replyer.before_model_request` 与 Planner Hook 保留各自协议；以下旧版占位/别名规则仅适用于这些历史格式，不作为新 Hook 的判断依据。
 
 0.6.4补齐Replyer的另一种真实历史格式：宿主把guided_reply自身历史重新构造成无消息ID/前缀的AssistantMessageItem。仅过滤这种assistant单一文本part且正文恰为`[语音消息]`的空占位；用户同名占位、混合内容、转写正文和对语音的讨论保留。此处身份依赖宿主assistant角色，无法区分bot刻意发出完全同名的纯文字；不做任意正文替换。0.6.3工具回执清理保留。
 

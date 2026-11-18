@@ -314,9 +314,11 @@ class NekoTTS(MaiBotPlugin):
                   order=HookOrder.LATE, timeout_ms=5000, error_policy=ErrorPolicy.SKIP)
     async def after_text_send(self, message=None, sent=False, **kwargs):
         """Observe voice visibility only; never match unrelated outgoing text."""
-        if not sent or not self._ready or not self.config.plugin.enabled:
+        if not self._ready or not self.config.plugin.enabled or not isinstance(message, dict):
             return None
-        stream_id = str(kwargs.get("stream_id") or (message or {}).get("session_id") or "").strip()
+        stream_id = kwargs.get('stream_id') or message.get('session_id')
+        if not isinstance(stream_id, str) or message.get('session_id', stream_id) != stream_id:
+            return None
         if self._visibility.observe(stream_id, message, sent):
             try:
                 self._visibility.save()
@@ -380,6 +382,8 @@ class NekoTTS(MaiBotPlugin):
     @HookHandler('maisaka.planner.before_request', name='neko_tts_hide_planner_voice',
                  mode=HookMode.BLOCKING, order=HookOrder.LATE, error_policy=ErrorPolicy.SKIP)
     async def hide_planner_voice(self, items=None, session_id='', **kwargs):
+        if not self._ready or not self.config.plugin.enabled:
+            return None
         if session_id:
             return self._visible_prompt(items, session_id, kwargs)
         kept = items
@@ -393,7 +397,19 @@ class NekoTTS(MaiBotPlugin):
     @HookHandler('maisaka.replyer.before_model_request', name='neko_tts_hide_replyer_voice',
                  mode=HookMode.BLOCKING, order=HookOrder.LATE, error_policy=ErrorPolicy.SKIP)
     async def hide_replyer_voice(self, items=None, session_id='', **kwargs):
+        if not self._ready or not self.config.plugin.enabled:
+            return None
         return self._visible_prompt(items, session_id, kwargs)
+
+    @HookHandler('maisaka.replyer.prepare_history', name='neko_tts_prepare_history',
+                 mode=HookMode.BLOCKING, order=HookOrder.LATE, error_policy=ErrorPolicy.SKIP)
+    async def prepare_history(self, schema_version=None, session_id=None, reply_message_id=None, entries=None, **kwargs):
+        if (not self._ready or not self.config.plugin.enabled or type(schema_version) is not int or schema_version != 1
+                or not isinstance(session_id, str) or not session_id.strip()
+                or not isinstance(reply_message_id, str) or not isinstance(entries, list)):
+            return None
+        hide = self._visibility.history_handles(session_id, reply_message_id, entries)
+        return {'action': 'continue', 'custom_result': {'schema_version': 1, 'hide': hide}}
 
     async def _background_voice(self, text: str, stream_id: str) -> bool:
         generation = self._generation

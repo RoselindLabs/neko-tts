@@ -73,7 +73,7 @@ class VoiceVisibility:
 
     def observe(self, scope, message, sent):
         """Match outgoing pure voice bytes/hash, not a text or time-window guess."""
-        if not scope or not sent or not isinstance(message, dict):
+        if not scope or sent is not True or not isinstance(message, dict):
             return False
         segments = message.get('raw_message')
         if not isinstance(segments, list) or len(segments) != 1:
@@ -104,6 +104,28 @@ class VoiceVisibility:
         while len(self.ids) > self.MAX_IDS:
             self.ids.popitem(last=False)
         return True
+
+    def history_handles(self, session_id, reply_message_id, entries):
+        """Select request-local history rows; never inspect rendered prompt text."""
+        eligible = {}
+        now = self.clock()
+        for row in entries:
+            if not isinstance(row, dict):
+                continue
+            handle = row.get('handle')
+            if not isinstance(handle, str) or not handle.strip():
+                continue
+            # Ambiguous handles cannot identify a single visible row. Distinct
+            # handles for the same ID are evaluated independently.
+            if handle in eligible:
+                eligible[handle] = False
+                continue
+            message_id = row.get('message_id')
+            eligible[handle] = (row.get('is_self') is True and row.get('pure_voice') is True
+                                and isinstance(message_id, str) and bool(message_id.strip())
+                                and message_id != reply_message_id
+                                and self.ids.get((session_id, message_id), now) > now)
+        return [handle for handle, hide in eligible.items() if hide]
 
     def _prune(self):
         for key, expires in list(self.ids.items()):
